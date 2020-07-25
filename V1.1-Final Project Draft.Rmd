@@ -1,0 +1,812 @@
+---
+title: "Text Mining"
+author: "Abdullah Saka, Britney Scott"
+date: "4/26/2020"
+output: pdf_document
+---
+
+# Introduction
+
+Yelp is a platform through which users can review their experiences with a wide variety of businesses. Each review consists of a text portion, as well as a star rating using a 1 to 5 scale. This project takes a subset of the restaurant reviews on Yelp and attempts to draw conclusions about the relationship between various words in the text portion of the review and the star rating through using text mining. Specifically, we will utilize the "bad of words" approach to text mining and apply three individual dictionaries. The objective is to identify which reviews are positive and negative based on the context of the text portion of the review.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidytext)
+library(SnowballC)
+library(textstem)
+library('tidyverse')
+library(textdata)
+```
+
+# Data Exploration and Preparation
+
+To begin, we explored the data in order to determine some basic information about the ratings in the provided dataset. The star ratings are distributed somewhat unevenly throughout the dataset, as demonstrated in the following histogram.
+
+```{r, echo=FALSE, message=FALSE, fig.height=3}
+# the data file uses ';' as delimiter, and for this we use the read_csv2 function
+resReviewsData <- read_csv2('~/Rprojects/Text Mining/yelpResReviewSample.csv')
+
+#number of reviews by start-rating
+dat <- resReviewsData %>% group_by(stars) %>% count()
+#dat
+names(dat) <- c("Stars", "Count")
+ggplot(data=dat, aes(x=Stars, y=Count, fill=Stars)) +geom_bar(stat="identity") + labs(fill = "Stars") + theme(legend.position = "none")
+```
+
+In order to perform sentiment analysis, the star ratings must be transformed into a binary classification. Two classes indicating positive and negative reviews will be required. To do so, we will eliminate all reviews which fall into the 3 star ratings. These reviews are considered neutral rather than positive or negative. Ratings of 1 and 2 stars will be considered negative, while ratings of 4 and 5 stars will be considered positive. 
+
+Before continuing to the sentiment analysis, though, we will examine a few words which are present in the text reviews and see if they relate to specific star ratings. Specifically, we will focus on the words 'funny', 'cool' and 'useful', all of which we would expect to be related to the positive reviews. 
+
+```{r, echo=FALSE, fig.height=3}
+ggplot(resReviewsData, aes(x= funny, y=stars)) +geom_point()
+```
+
+It's evident in the above plot that the word 'funny' is most commonly used in 4 star reviews. It's not very common in the negative reviews, which makes sense considering funny is generally a positive quality. 
+
+```{r, echo=FALSE, fig.height=3}
+ggplot(resReviewsData, aes(x= cool, y=stars)) +geom_point()
+```
+
+Similarly, 'cool' is generally related with positive reviews. It's very interesting that this word seems to be used in 3 star ratings even more than 5, but it's clearly most common in the 4 star ratings.
+
+```{r, echo=FALSE, fig.height=3}
+ggplot(resReviewsData, aes(x= useful, y=stars)) +geom_point()
+```
+
+Finally, the word useful is also commonly used within the positive reviews. The patterns are similar to the previous words.
+
+```{r, include=FALSE, results=FALSE, cache=TRUE}
+#The reviews are from various locations -- check
+resReviewsData %>%   group_by(state) %>% tally() 
+#Can also check the postal-codes`
+resReviewsData %>%   group_by(strtrim(as.character(postal_code),3)) %>% tally()
+
+#If you want to keep only the those reviews from 5-digit postal-codes  
+rrData <- resReviewsData %>% filter(str_detect(postal_code, "^[0-9]{1,5}"))
+```
+
+Before performing sentiment analysis, we also did some modification to the data. We removed all reviews which did not come from a 5-digit postal code. We then tokenized the reviews, which converts the reviews from one long string of text to individual words. This is done in order to prepare the data for sentiment analysis, as each individual word from the review will need to be compared to the dictionary. The order of the words is not relevant since we will use the "bag of words" approach. 
+
+```{r, include=FALSE,  message=FALSE , cache=TRUE}
+
+#tokenize the text of the reviews in the column named 'text'
+#rrTokens <- rrData %>% unnest_tokens(word, text)
+   # this will retain all other attributes
+#Or we can select just the review_id and the text column
+rrTokens <- rrData %>% select(review_id, stars, text ) %>% unnest_tokens(word, text)
+
+#How many tokens?
+with <- rrTokens %>% distinct(word) %>% dim()
+
+#remove stopwords
+rrTokens <- rrTokens %>% anti_join(stop_words)
+ #compare with earlier - what fraction of tokens were stopwords?
+without <- rrTokens %>% distinct(word) %>% dim()
+```
+
+Next, we removed stop words because they are not helpful in understanding the meaning behind the review. Stop words include words such as 'and', 'a', and 'the' which are present across all reviews regardless of the review's content. Removal of the stop words decreased the total number of tokens (unique words) from `r with[1]` to `r without[1]`.
+
+```{r, echo=FALSE, include=FALSE}
+#count the total occurrences of differet words, & sort by most frequent
+rrTokens %>% count(word, sort=TRUE) %>% top_n(10)
+
+#Are there some words that occur in a large majority of reviews, or which are there in very few reviews?   Let's remove the words which are not present in at least 10 reviews
+rareWords <-rrTokens %>% count(word, sort=TRUE) %>% filter(n<10)
+xx<-anti_join(rrTokens, rareWords)
+
+commonWords <-rrTokens %>% count(word, sort=TRUE) %>% filter(n>15000)
+xx<-anti_join(xx, commonWords)
+
+#check the words in xx .... 
+xx %>% count(word, sort=TRUE) 
+   #you willl see that among the least frequently occurring words are those starting with or including numbers (as in 6oz, 1.15,...).  To remove these
+xx2<- xx %>% filter(str_detect(word,"[0-9]")==FALSE)
+   #the variable xx, xx2 are for checking ....if this is what we want, set the rrTokens to the reduced set of words.  And you can remove xx, xx2 from the environment.
+rrTokens<- xx2
+
+new <- rrTokens %>% distinct(word) %>% dim()
+```
+
+We also wanted to remove any additional words which are either present in most reviews, or in very few reviews. Rare words included several words with numbers such as '12pm', as well as some words in other languages and words that are not very relevant to restaurants such as 'courthouse.' The most common word used in over 20,000 reviews is 'food', which does not indicate a positive or negative sentiment since the review could either compliment or complain about the food. Therefore, we removed all words used in less than 10 reviews or more than 15,000 reviews. 
+
+We also removed any other numeric words since they don't have much meaning in terms of sentiment analysis. All of this brought down the number of tokens to `r new[1]`. This is a significant reduction in tokens from the initial set of `r with[1]`.
+
+# Data Analysis
+
+Then, we analyzed the frequency of words in each rating and then calculated proportion of word occurrence by star ratings. We checked the proportion of 'love' (positive sentiment) and 'worst' (negative sentiment) among reviews with rating stars. We can clearly say that while rating 4 and 5 represent positive reviews, rating 1 and 2 are more related to negative reviews.
+
+```{r  message=FALSE, echo=FALSE, cache=TRUE, fig.width=3, fig.height=3}
+par(mfrow=c(1,2))
+#Check words by star rating of reviews
+#rrTokens %>% group_by(stars) %>% count(word, sort=TRUE)
+#or...
+rrTokens %>% group_by(stars) %>% count(word, sort=TRUE) %>% arrange(desc(stars)) 
+
+#proportion of word occurrence by star ratings
+ws <- rrTokens %>% group_by(stars) %>% count(word, sort=TRUE)
+ws<-  ws %>% group_by(stars) %>% mutate(prop=n/sum(n))
+
+#check the proportion of 'love' among reviews with 1,2,..5 stars 
+ws %>% filter(word=='love') %>% ggplot(aes(stars, n),title='LOVE')+geom_col(fill = "#993333")+theme(axis.text=element_text(size=14),axis.title=element_text(size=16,face="bold"))+coord_flip() + ggtitle('LOVE') + theme(plot.title = element_text(hjust = 0.5,size=20))
+
+ws %>% filter(word=='worst') %>% ggplot(aes(stars, n))+geom_col(fill = "#000099")+theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"))+ggtitle('WORST')+coord_flip()+theme(plot.title = element_text(hjust = 0.5,size = 20))
+```
+
+Afterwards, we computed the number of occurences and probability of each word by rating. We plotted the top 20 words in each rating to understand difference between ratings. According to the plot shown below, there are common words among ratings which are 'service', 'restaurant', 'menu', 'table', 'people' and 'time'. We have to prune set of common words from token list since these words are not useful understanding difference among reviews. As expected, ratings 1 and 2 includes negative words such as 'bad', 'worst', 'horrible' and 'wait'. On the other hand, higher ratings (4 and 5) comprise of positive words which are 'delicious', 'amazing', 'pretty' and 'nice'.
+
+```{r  message=FALSE, echo=FALSE, cache=TRUE, fig.width=9, fig.height=12}
+par(mfrow=c(1,5))
+#what are the most commonly used words by start rating
+#ws %>% group_by(stars) %>% arrange(stars, desc(prop)) %>% view()
+
+#to see the top 20 words by star ratings
+#ws %>% group_by(stars) %>% arrange(stars, desc(prop)) %>% filter(row_number()<=20L) %>% view()
+
+#To plot this
+ws %>% group_by(stars) %>% arrange(stars, desc(prop)) %>% filter(row_number()<=20L) %>% ggplot(aes(word, prop))+geom_col(,fill="#330066")+coord_flip()+facet_wrap((~stars)) + theme_gray()
+```
+
+To understand which words are generally related to higher and lower ratings, we calculated the average stars associated with each word and then summed up the star ratings with reviews where each word occurs in. Based on that, top 20 words with the highest rating includes general words ('restaurant', 'service', 'menu') and positive words ('nice', 'delicious', 'love' and 'friendly').
+
+```{r, echo=FALSE, message=FALSE , cache=TRUE,fig.width=6,fig.height=2.5, fig.align='center', warning=FALSE}
+
+#Can we get a sense of which words are related to higher/lower star ratings in general? 
+#One approach is to calculate the average star rating associated with each word - can sum the star ratings associated with reviews where each word occurs in.  Can consider the proportion of each word among reviews with a star rating.
+xx<- ws %>% group_by(word) %>% summarise(totWS=sum(stars*prop))
+
+xx %>% count(word, sort=TRUE) 
+
+#What are the 20 words with highest and lowest star rating
+xx %>% top_n(20) %>% ggplot(aes(word, totWS))+geom_col(fill = "#BB4444")+theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=12,face="bold")) +
+        theme(axis.text.x = element_text(angle=90))+ 
+        labs(y="Review Proportion", x = "Word") +
+        ggtitle("Most Positive Words") +   
+        scale_y_continuous(limits=c(0, 0.4), 
+        breaks=c(0,0.2,0.4),labels = scales::comma)
+```
+
+Nevertheless, review of lowest star rating generally obtains negative words which are 'disgust', 'disrespectful', 'unwilling', 'bullshit'. This analysis states the fundamental difference between ratings.
+
+```{r, echo=FALSE,fig.width=6,fig.height=2.5, message=FALSE, fig.align='center'}
+
+xx %>% top_n(-20) %>% ggplot(aes(word, totWS))+geom_col(fill = "#CC9966")+theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=12,face="bold"))+
+        theme(axis.text.x = element_text(angle=90))+
+        labs(y="Review Proportion", x = "Word") +
+        ggtitle("Most Negative Words") +   
+        scale_y_continuous(limits=c(0, 0.0002), 
+        breaks=c(0,0.0001,0.0002),labels = scales::comma)
+```
+
+As a result of exploratory data analysis, we removed common words from token list. The reason why we eliminate is to enhance performance of sentiment analysis. These word list does not make difference identifying sentiments among documents.
+
+```{r  message=FALSE , cache=TRUE,fig.width=7,fig.height=3}
+common_dict <- c('food','service','time','restaurant','chicken','pizza','menu','eat','lunch','people','meal','cheese','table')
+
+rrTokens<- rrTokens[ ! rrTokens$word %in% common_dict, ]
+rrTokens 
+```
+
+# Stemming and Lemmatization
+
+After tokenizing and removing stopwords, we are able to perform stemming or lemmatization process in text mining. When stemming helps us achieve the root forms of inflected words. Moreover, lemmatization is the process of grouping together the diverse inflected forms of a word so they can be analyzed as a single item. While converting any word to the root-base word, stemming can create non-existent work but lemmatization generates real dictionary words. This table shows difference between stemming and lemma words:
+
+```{r , cache=TRUE,fig.align='center', echo=FALSE}
+rrTokens_stem<-rrTokens %>%  mutate(word_stem = SnowballC::wordStem(word))
+rrTokens_lemm<-rrTokens %>%  mutate(word_lemma = textstem::lemmatize_words(word))
+   #Check the original words, and their stemmed-words and word-lemmas
+t<-subset(rrTokens_stem,select = c('word','word_stem'))
+t<-as.data.frame(t[62:83,])
+z<- subset(rrTokens_lemm,select = c('word_lemma'))
+z<-as.data.frame(z[62:83,])
+p<-cbind(t,z)
+knitr::kable(p, align = c('c', 'c'), col.names=c("Original","Stemming","Lemma"))
+```
+
+# Term-Frequency
+
+We carried out lemmatization instead of stemmed words and filtered out less than 3 characters and more than 15 characters to decrease the number of tokens. Then, we computed tf-idf scores in order to run sentiment analysis. Tf-idf is a statistic which is reflect how important a word is to a document in a collection of groups. Term frequency (tf) identifies the frequency of individual terms within a document. Also, we need to understand the importance that words provide within and across documents. Inverse document frequency (Idf) which decreased the weight for commonly used words and increased the weight for words that are not used very much in a collection of documents.Tf-idf score calculated by multiplying these two scores. The table below demonstrates tf-idf scores of first review.
+
+```{r, echo=FALSE,  message=FALSE , cache=TRUE}
+
+#tokenize, remove stopwords, and lemmatize (or you can use stemmed words instead of lemmatization)
+rrTokens<-rrTokens %>%  mutate(word = textstem::lemmatize_words(word))
+
+#Or, to you can tokenize, remove stopwords, lemmatize  as
+#rrTokens <- resReviewsData %>% select(review_id, stars, text, ) %>% unnest_tokens(word, text) %>%  anti_join(stop_words) %>% mutate(word = textstem::lemmatize_words(word))
+ 
+
+#We may want to filter out words with less than 3 characters and those with more than 15 characters
+rrTokens<-rrTokens %>% filter(str_length(word)<=3 | str_length(word)<=15)
+
+rrTokens<- rrTokens %>% group_by(review_id, stars) %>% count(word)
+
+#count total number of words by review, and add this in a column
+totWords<-rrTokens  %>% group_by(review_id) %>%  count(word, sort=TRUE) %>% summarise(total=sum(n))
+xx<-left_join(rrTokens, totWords)
+  # now n/total gives the tf values
+xx<-xx %>% mutate(tf=n/total)
+#head(xx)
+
+#We can use the bind_tfidf function to calculate the tf, idf and tfidf values
+# (https://www.rdocumentation.org/packages/tidytext/versions/0.2.2/topics/bind_tf_idf)
+rrTokens<-rrTokens %>% bind_tf_idf(word, review_id, n)
+z<-head(rrTokens,10)
+knitr::kable(z, align = c('c','c','c','c','c','c'))
+```
+
+# Sentiment Analysis
+
+## Bing Dictionary
+
+We applied 3 different dictionaries to perform sentiment analysis such as 'bing','nrc', 'afinn'. Firstly, we focused on 'bing' dictionary includes 6786 words and their sentiments. Sentiments are described as positive or negative. Most of the words (4781) belongs to negative sentiments.
+
+```{r message=FALSE , cache=TRUE,fig.align=center}
+#AFINN http://www2.imm.dtu.dk/pubdb/views/publication_details.php?id=6010
+#bing  https://www.cs.uic.edu/~liub/FBS/sentiment-analysis.html 
+#nrc http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm
+library(textdata)
+
+#take a look at the words in the sentiment dictionaries
+#get_sentiments("bing") %>% view()
+#get_sentiments("nrc") %>% view()
+#get_sentiments("afinn") %>% view()
+d<- table(get_sentiments("bing")$sentiment)
+d<- as.data.frame(d)
+names(d) <- c('Sentiment','Freq')
+d %>% ggplot(aes(Sentiment, Freq))+geom_col(fill = "#339933")+theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"))+ggtitle('BING ')+coord_flip()+theme(plot.title = element_text(hjust = 0.5,size = 20))
+```
+
+To determine sentiments to words in documents, we applied 'bing' dictionary by doing left or inner join. Then, we also added occurrences of positive and negative sentiment words in reviews. The plot demonsrates the most positive and negative words in reviews. While,'love','nice','delicious','friendly','pretty' are the most popular positive words, 'bad','disappoint','die','hard','cold represents negative sentiments.
+
+```{r message=FALSE , cache=TRUE,fig.align=center,fig.height=5}
+#sentiment of words in rrTokens
+rrSenti_bing<- rrTokens %>% left_join(get_sentiments("bing"), by="word")
+#if we want to retain only the words which match the sentiment dictionary, do an inner-join
+rrSenti_bing<- rrTokens %>% inner_join(get_sentiments("bing"), by="word")
+
+#Analyze Which words contribute to positive/negative sentiment - we can count the ocurrences of positive/negative sentiment words in the reviews
+xx<-rrSenti_bing %>% group_by(word, sentiment) %>% summarise(totOcc=sum(n)) %>% arrange(sentiment, desc(totOcc))
+ #negate the counts for the negative sentiment words
+xx<- xx %>% mutate (totOcc=ifelse(sentiment=="positive", totOcc, -totOcc))
+
+#the most positive and most negative words
+xx<-ungroup(xx)
+#xx %>% top_n(25)
+#xx %>% top_n(-25)
+
+#You can plot these
+#rbind(top_n(xx, 25), top_n(xx, -25)) %>% ggplot(aes(word, totOcc, fill=sentiment))+geom_col()+coord_flip()
+
+#or, with a better reordering of words
+rbind(top_n(xx, 25), top_n(xx, -25)) %>% mutate(word=reorder(word,totOcc)) %>% ggplot(aes(word, totOcc, fill=sentiment)) +geom_col()+coord_flip() + ggtitle('Sentiment based on BING')+ theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=18,face="bold"))+ theme(plot.title = element_text(hjust = 0.5,size = 20,face = 'bold'))
+```
+
+We have analyzed overall sentiment across reviews until this point, now we concentrated on sentiment by review to understand how review relates to review's star ratings. For each review, we computed positive and negative words, then created probability of being positive and negative. Lastly, we created sentiment score by taking absolute value of difference of positive and negative score of review. By using sentimens score of reviews, 
+
+```{r message=FALSE , cache=TRUE}
+#summarise positive/negative sentiment words per review
+revSenti_bing <- rrSenti_bing %>% group_by(review_id, stars) %>% summarise(nwords=n(),posSum=sum(sentiment=='positive'), negSum=sum(sentiment=='negative'))
+
+revSenti_bing<- revSenti_bing %>% mutate(posProp=posSum/nwords, negProp=negSum/nwords)
+revSenti_bing<- revSenti_bing %>% mutate(sentiScore=posProp-negProp)
+
+#Do review start ratings correspond to the the positive/negative sentiment words
+revSenti_bing %>% group_by(stars) %>% summarise(avgPos=mean(posProp), avgNeg=mean(negProp), avgSentiSc=mean(sentiScore))
+```
+
+By using sentimens score of reviews, we computed average of positive and negative score for each rating. According to table above, star rating 1 and 2 represents negative reviews since average sentiment score is below than zero. Nonetheless, star rating 4 and 5 points out positive reviews.
+
+We built document-term matrix of reviews dataset. In document-term matrix, rows shows reviews and columns correspond to words. Then, we filtered out reviews whose rating is 3 since sentiment score of rating 3 is positive, but lower (includes both negative and positive reviews). Then, when star rating of review is less than 2, we assigned these reviews as class -1 and others belong to class 1. Based on table, the most of reviews are assigned to class 1 and only 6671 reviews correspond negative reviews.
+
+```{r message =FALSE, cache=TRUE}
+#considering only those words which match a sentiment dictionary (for eg.  bing)
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words   (https://tidyr.tidyverse.org/reference/pivot_wider.html)
+#revDTM_sentiBing <- rrSenti_bing %>%  pivot_wider(id_cols = review_id, names_from = word, values_from = tf_idf)
+
+#Or, since we want to keep the stars column
+revDTM_sentiBing <- rrSenti_bing %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+    #Note the ungroup() at the end -- this is IMPORTANT;  we have grouped based on (review_id, stars), and this grouping is retained by default, and can cause problems in the later steps
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiBing <- revDTM_sentiBing %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiBing %>% group_by(hiLo) %>% tally()
+```
+
+## NRC Dictionary
+
+For a second dictionary choice, we used the NRC dictionary. Rather than just identifying words as positive and negative, this dicgtionary assigns a more specific sentiment to each word. For example, some words may portray 'anger', 'trust' and 'negative'. 
+
+```{r, echo=FALSE}
+d<- table(get_sentiments("nrc")$sentiment)
+d<- as.data.frame(d)
+names(d) <- c('Sentiment','Freq')
+
+d %>% ggplot(aes(Sentiment, Freq))+geom_col(fill = "#339933")+theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"))+ggtitle('NRC ')+coord_flip()+theme(plot.title = element_text(hjust = 0.5,size = 20))
+```
+
+```{r message=FALSE, echo=FALSE , cache=TRUE}
+#get_sentiments("bing") %>% view()
+
+rrSenti_nrc<-rrTokens %>% inner_join(get_sentiments("nrc"), by="word") %>% group_by (word, sentiment) %>% summarise(totOcc=sum(n)) %>% arrange(sentiment, desc(totOcc))
+
+rrSenti_nrc %>% group_by(sentiment) %>% summarise(count=n(), sumn=sum(totOcc))
+
+t <- rrSenti_nrc %>% group_by(sentiment) %>% summarise(count=n(), sumn=sum(totOcc))
+knitr::kable(t)
+```
+
+```{r, echo=FALSE}
+#In 'nrc', the dictionary contains words defining different sentiments, like anger, disgust, positive, negative, joy, trust,.....   you should check the words deonting these different sentiments
+rrSenti_nrc %>% filter(sentiment=='anger')
+rrSenti_nrc %>% filter(sentiment=='anticipation') 
+rrSenti_nrc %>% filter(sentiment=='disgust')
+rrSenti_nrc %>% filter(sentiment=='fear') 
+rrSenti_nrc %>% filter(sentiment=='joy') 
+rrSenti_nrc %>% filter(sentiment=='negative') 
+rrSenti_nrc %>% filter(sentiment=='positive') 
+rrSenti_nrc %>% filter(sentiment=='sadness')
+rrSenti_nrc %>% filter(sentiment=='surprise')
+rrSenti_nrc %>% filter(sentiment=='trust')
+```
+
+```{r, echo=FALSE}
+xx<-rrSenti_nrc %>% mutate(goodBad=ifelse(sentiment %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), -totOcc, ifelse(sentiment %in% c('positive', 'joy', 'anticipation', 'trust'), totOcc, 0)))
+
+xx<-ungroup(xx)
+top_n(xx, 10)
+top_n(xx, -10)
+
+
+rbind(top_n(xx, 25), top_n(xx, -25)) %>% mutate(word=reorder(word,goodBad)) %>% ggplot(aes(word, goodBad, fill=goodBad)) +geom_col()+coord_flip()+ ggtitle('Sentiment based on NRC')+ theme(axis.text=element_text(size=16),
+        axis.title=element_text(size=18,face="bold"))+ theme(plot.title = element_text(hjust = 0.5,size = 20,face = 'bold'))
+
+d<- table(get_sentiments("nrc")$sentiment)
+d<- as.data.frame(d)
+names(d) <- c('Sentiment','Freq')
+
+d %>% ggplot(aes(Sentiment, Freq))+geom_col(fill = "#339933")+theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"))+ggtitle('NRC ')+coord_flip()+theme(plot.title = element_text(hjust = 0.5,size = 20))
+```
+
+```{r message =FALSE, cache=TRUE}
+#considering only those words which match a sentiment dictionary (for eg.  bing)
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words   (https://tidyr.tidyverse.org/reference/pivot_wider.html)
+#revDTM_sentiBing <- rrSenti_bing %>%  pivot_wider(id_cols = review_id, names_from = word, values_from = tf_idf)
+
+rrSenti_nrc<-rrTokens %>% inner_join(get_sentiments("nrc"), by="word") 
+
+#Must remove the duplicate words for each review
+rrSenti_nrc <- rrSenti_nrc [!duplicated(rrSenti_nrc[c("review_id", "word")]),]
+
+#Or, since we want to keep the stars column
+revDTM_sentiNrc <- rrSenti_nrc %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiNrc <- revDTM_sentiNrc %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiNrc %>% group_by(hiLo) %>% tally()
+```
+
+## AFINN Dictionary
+
+```{r, echo=FALSE}
+d<- table(get_sentiments("afinn")$value)
+d<- as.data.frame(d)
+names(d) <- c('Value','Freq')
+
+d %>% ggplot(aes(Value, Freq))+geom_col(fill = "#339933")+theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"))+ggtitle('AFINN ')+coord_flip()+theme(plot.title = element_text(hjust = 0.5,size = 20))
+```
+
+```{r message=FALSE, echo=FALSE , cache=TRUE}
+get_sentiments("afinn")
+
+rrSenti_afinn<-rrTokens %>% inner_join(get_sentiments("afinn"), by="word") %>% group_by (word, value) %>% summarise(totOcc=sum(n)) %>% arrange(value, desc(totOcc))
+
+t <- rrSenti_afinn %>% group_by(value) %>% summarise(count=n(), sumn=sum(totOcc))
+knitr::kable(t)
+```
+
+```{r, echo=FALSE}
+xx<-rrSenti_afinn %>% mutate(goodBad=ifelse(value < 0, -totOcc, ifelse(value > 0, totOcc, 0)))
+
+xx<-ungroup(xx)
+top_n(xx, 10)
+top_n(xx, -10)
+
+
+rbind(top_n(xx, 25), top_n(xx, -25)) %>% mutate(word=reorder(word,goodBad)) %>% ggplot(aes(word, goodBad, fill=goodBad)) +geom_col()+coord_flip()+ ggtitle('Sentiment based on AFINN')+ theme(axis.text=element_text(size=13), axis.title=element_text(size=16,face="bold"))+ theme(plot.title = element_text(hjust = 0.5,size = 20,face = 'bold'))
+```
+
+
+```{r, echo=FALSE}
+#with AFINN dictionary words....following similar steps as above, but noting that AFINN assigns negative to positive sentiment value for words matching the dictionary
+rrSenti_afinn<- rrTokens %>% inner_join(get_sentiments("afinn"), by="word")
+
+revSenti_afinn <- rrSenti_afinn %>% group_by(review_id, stars) %>% summarise(nwords=n(), sentiSum =sum(value))
+
+revSenti_afinn %>% group_by(stars) %>% summarise(avgLen=mean(nwords), avgSenti=mean(sentiSum))
+```
+
+```{r message =FALSE, cache=TRUE}
+rrSenti_afinn<-rrTokens %>% inner_join(get_sentiments("afinn"), by="word") 
+
+#Or, since we want to keep the stars column
+revDTM_sentiAfinn <- rrSenti_afinn %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+    #Note the ungroup() at the end -- this is IMPORTANT;  we have grouped based on (review_id, stars), and this grouping is retained by default, and can cause problems in the later steps
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiAfinn <- revDTM_sentiAfinn %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+
+#how many review with 1, -1  'class'
+revDTM_sentiAfinn %>% group_by(hiLo) %>% tally()
+```
+
+# Machine Learning Models
+
+## Bing Dictionary
+
+We created a sample from document-term matrix which was built by 'bing' dictionary.
+
+```{r message =FALSE, cache=TRUE}
+set.seed(7)
+nr<-nrow(revDTM_sentiBing)
+sampleIndex = sample(1:nr, size = round(0.4368*nr), replace=FALSE)
+bing_data <- revDTM_sentiBing[sampleIndex, ] 
+```
+
+### Random Forest
+
+Firstly, we splitted data into train and test dataset at the ratio of 65:35. We implemented random forest model by using different number of trees such as 70, 120, 180 trees. Then, we realized that there is no siginicant improvement (just 0.5%) when we increase the number of trees so we decided  120 trees.
+
+```{r message =FALSE, cache=TRUE}
+#develop a random forest model to predict hiLo from the words in the reviews
+
+#replace all the NAs with 0
+bing_data<-bing_data %>% replace(., is.na(.), 0)
+bing_data$hiLo<- as.factor(bing_data$hiLo)
+
+library(rsample)
+revDTM_sentiBing_split<- initial_split(bing_data, 0.65)
+revDTM_sentiBing_trn<- training(revDTM_sentiBing_split)
+revDTM_sentiBing_tst<- testing(revDTM_sentiBing_split)
+```
+
+```{r message =FALSE, cache=TRUE,warning=False}
+library(ranger)
+rfModel1<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiBing_trn %>% select(-review_id), num.trees = 120, importance='permutation', probability = TRUE)
+
+rfModel1
+```
+
+We checked which variables carries more weights on the model to predict class of review. According to importance specified by random forest, the most 10 significant words comprise of both positive and negative words,but majority of them are related to positive words. ('fresh','friendly','fun','ready','awesome',etc...).
+
+```{r message =FALSE, cache=TRUE,fig.width=5}
+#which variables are important
+library(data.table)
+setDT(importance, keep.rownames = TRUE)[]
+importance <- as.data.frame(importance(rfModel1)) 
+importance <- setDT(importance, keep.rownames = TRUE)[]
+colnames(importance) <- c('Terms','Importance')
+importance <- importance[1:10]
+
+importance %>% ggplot(aes(Terms,Importance, fill=Importance)) +geom_col() + ggtitle('Variable Importance')+ theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=12,face="bold"))+ theme(plot.title = element_text(hjust = 0.5,size = 12,face = 'bold'))
+```
+
+The table shows confusion matrix of train dataset:
+
+```{r message =FALSE, cache=TRUE}
+#Obtain predictions, and calculate performance
+revSentiBing_predTrn<- predict(rfModel1, revDTM_sentiBing_trn %>% select(-review_id))$predictions
+
+x <- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_predTrn[,2]>0.5)
+x
+```
+
+The table points out peformance metrics of the random forest model on train dataset:
+
+```{r message =FALSE, cache=TRUE}
+Metric <- c("Accuracy","Precision","Recall")
+Result_rf1 <- c(round((x[1, 1] + x[2, 2]) / sum(x),3), round(x[2,2]/(x[2,1]+x[2,2]),3), round(x[2,2]/(x[1,2]+x[2,2]),3))
+p <- as.data.frame(cbind(Metric, Result_rf1 ))
+colnames(p) <- c('Metric','Value')
+p
+
+```
+
+The table shows confusion matrix of test dataset:
+
+```{r message =FALSE, cache=TRUE}
+#Obtain predictions, and calculate performance
+revSentiBing_predTst<- predict(rfModel1, revDTM_sentiBing_tst %>% select(-review_id))$predictions
+
+x2 <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_predTst[,2]>0.5)
+x2
+```
+
+The table points out peformance metrics of the random forest model on test dataset:
+
+```{r message =FALSE, cache=TRUE}
+Metric <- c("Accuracy","Recall","Precision")
+Result_rf2 <- c(round((x2[1, 1] + x2[2, 2]) / sum(x2),3), round(x2[2,2]/(x2[2,1]+x2[2,2]),3), round(x2[2,2]/(x2[1,2]+x2[2,2]),3))
+p2 <- as.data.frame(cbind(Metric, Result_rf2))
+colnames(p2) <- c('Metric','Value')
+p2
+```
+
+This plot indicates ROC curve of the random forest model on train and test dataset.Wen blue line represents the model performance on training data, red line corresponds to test data.
+
+```{r message =FALSE, cache=TRUE}
+library(pROC)
+rocTrn <- roc(revDTM_sentiBing_trn$hiLo, revSentiBing_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiBing_tst$hiLo, revSentiBing_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+```
+
+Then, we determined best threshold by using ROC curve and so created the confusion matrix on test data. It can be clearly seen that random forest model with the optimal thresholds separates reviews which have different class much better.
+
+```{r message =FALSE, cache=TRUE}
+#Best threshold from ROC analyses
+bThr<-coords(rocTrn, "best", ret="threshold", transpose = FALSE)
+thresh <- rep(bThr,nrow(revSentiBing_predTst))
+upd<- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_predTst[,2]>thresh)
+```
+
+```{r message =FALSE, cache=TRUE}
+Metric <- c("Accuracy","Recall","Precision")
+Result_rf_upd <- c(round((upd[1, 1] + upd[2, 2]) / sum(upd),3), round(upd[2,2]/(upd[2,1]+upd[2,2]),3), round(upd[2,2]/(upd[1,2]+upd[2,2]),3))
+q <- as.data.frame(cbind(Metric, Result_rf_upd))
+colnames(q) <- c('Metric','Value')
+q
+```
+
+### Generalized Linear Model
+
+```{r, echo=FALSE}
+
+xD<- revDTM_sentiBing_trn %>% select(-c(hiLo,review_id))
+yD<- revDTM_sentiBing_trn$hiLo
+
+#Lasso with Regular Training
+lassofull <- cv.glmnet(data.matrix(xD), yD, family = "binomial", type.measure = "class", nfolds=5, alpha=1, nlambda = 100)
+
+prTrn <- predict(lassofull, data.matrix(revDTM_sentiBing_trn %>% select(- c(hiLo,review_id))),s="lambda.1se",type='response')
+
+
+t <- table(actual=revDTM_sentiBing_trn$hiLo, preds=prTrn>0.5)
+t
+```
+
+```{r, echo=FALSE}
+prTst <- predict(lassofull, data.matrix(revDTM_sentiBing_tst %>% select(-c(hiLo,review_id))),s="lambda.1se",type='class')
+
+x3<- table(actual=revDTM_sentiBing_tst$hiLo,prediction=prTst)
+x3
+```
+
+```{r, echo=FALSE}
+Metric <- c("Accuracy","Recall","Precision")
+Result_lasso <- c(round((x3[1, 1] + x3[2, 2]) / sum(x3),3), round(x3[2,2]/(x3[2,1]+x3[2,2]),3), round(x3[2,2]/(x3[1,2]+x3[2,2]),3))
+p3 <- as.data.frame(cbind(Metric, Result_lasso))
+colnames(p3) <- c('Metric','Value')
+p3
+
+```
+
+```{r message =FALSE, cache=TRUE}
+predLassofull=prediction(prTrn, revDTM_sentiBing_trn$hiLo)
+aucPerflassofull1 <-performance(predLassofull, "tpr", "fpr")
+plot(aucPerflassofull1, main="ROC Curve for Lasso",col='blue')
+
+prTst <- predict(lassofull, data.matrix(revDTM_sentiBing_tst %>% select(-c(hiLo,review_id))),s="lambda.1se",type='response') 
+
+predLassofull=prediction(prTst, revDTM_sentiBing_tst$hiLo)
+aucPerflassofull2 <-performance(predLassofull, "tpr", "fpr")
+plot(aucPerflassofull2, main="ROC Curve for Lasso",col='red',add=TRUE)
+
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+```
+
+### Naive-Bayes Model
+
+```{r message=FALSE, cache=TRUE,warning=False}
+#https://www.rdocumentation.org/packages/e1071/versions/1.7-2/topics/naiveBayes
+
+nbModel1<-naiveBayes(hiLo ~ ., data=revDTM_sentiBing_trn %>% select(-review_id),laplace = True)
+
+revSentiBing_NBpredTrn<-predict(nbModel1, revDTM_sentiBing_trn, type = "raw")
+revSentiBing_NBpredTst<-predict(nbModel1, revDTM_sentiBing_tst, type = "raw")
+
+Z <- table(actual=revDTM_sentiBing_trn$hiLo, pred=revSentiBing_NBpredTrn[,2]>0.5)
+Z
+
+auc(as.numeric(revDTM_sentiBing_trn$hiLo), revSentiBing_NBpredTrn[,2])
+```
+
+```{r message=FALSE, cache=TRUE,warning=False}
+k <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_NBpredTst[,2]>0.5)
+k
+
+auc(as.numeric(revDTM_sentiBing_tst$hiLo), revSentiBing_NBpredTst[,2])
+
+```
+
+```{r message=FALSE, cache=TRUE,warning=False}
+
+rocTrn_nb <- roc(revDTM_sentiBing_trn$hiLo, revSentiBing_NBpredTrn[,2], levels=c(-1, 1))
+rocTst_nb <- roc(revDTM_sentiBing_tst$hiLo, revSentiBing_NBpredTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn_nb, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst_nb, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+```
+
+```{r message =FALSE, cache=TRUE}
+#Best threshold from ROC analyses
+bThr<-coords(rocTrn_nb, "best", ret="threshold", transpose = FALSE)
+thresh1 <- rep(bThr,nrow(revSentiBing_predTrn))
+m<- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_NBpredTrn[,2]>thresh1)
+thresh2 <- rep(bThr,nrow(revSentiBing_predTst))
+f<- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_NBpredTst[,2]>thresh2)
+```
+
+```{r, echo=FALSE}
+Metric <- c("Accuracy","Recall","Precision")
+Result_naive <- c(round((f[1, 1] + f[2, 2]) / sum(f),3), round(f[2,2]/(f[2,1]+f[2,2]),3), round(f[2,2]/(f[1,2]+f[2,2]),3))
+f1 <- as.data.frame(cbind(Metric, Result_naive))
+colnames(f1) <- c('Metric','Value')
+f1
+```
+
+# NRC dictionary
+
+We created a sample from document-term matrix which was built by 'nrc' dictionary.
+
+```{r message =FALSE, cache=TRUE}
+set.seed(7)
+nr<-nrow(revDTM_sentiNrc)
+sampleIndex = sample(1:nr, size = round(0.4368*nr), replace=FALSE)
+nrc_data <- revDTM_sentiNrc[sampleIndex, ] 
+```
+
+### Random Forest
+
+Firstly, we splitted data into train and test dataset at the ratio of 65:35. We implemented random forest model by using different number of trees such as 70, 120, 180 trees. Then, we realized that there is no siginicant improvement (just 0.5%) when we increase the number of trees so we decided  120 trees.
+
+```{r message =FALSE, cache=TRUE}
+#develop a random forest model to predict hiLo from the words in the reviews
+
+nrc_data <- nrc_data %>% replace(., is.na(.), 0)
+nrc_data$hiLo<- as.factor(nrc_data$hiLo)
+
+library(rsample)
+revDTM_sentiNrc_split<- initial_split(nrc_data, 0.65)
+revDTM_sentiNrc_trn<- training(revDTM_sentiNrc_split)
+revDTM_sentiNrc_tst<- testing(revDTM_sentiNrc_split)
+```
+
+```{r message =FALSE, cache=TRUE,warning=False}
+library(ranger)
+rfModelnrc70<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiNrc_trn %>% select(-review_id), num.trees = 70, importance='permutation', probability = TRUE)
+
+rfModelnrc120<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiNrc_trn %>% select(-review_id), num.trees = 120, importance='permutation', probability = TRUE)
+
+rfModelnrc180<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiNrc_trn %>% select(-review_id), num.trees = 180, importance='permutation', probability = TRUE)
+```
+
+```{r message =FALSE, cache=TRUE,fig.width=10}
+#which variables are important
+library(data.table)
+importance <- as.data.frame(importance(rfModelnrc70)) 
+importance <- setDT(importance, keep.rownames = TRUE)[]
+colnames(importance) <- c('Terms','Importance')
+importance <- importance[1:10]
+
+importance %>% ggplot(aes(Terms,Importance, fill=Importance)) +geom_col() + ggtitle('Variable Importance')+ theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=12,face="bold"))+ theme(plot.title = element_text(hjust = 0.5,size = 12,face = 'bold'))
+```
+
+This table shows confusion matrix of the train dataset:
+
+```{r,echo=FALSE}
+revSentiNrc_predTrn70<- predict(rfModelnrc70, revDTM_sentiNrc_trn %>% select(-review_id))$predictions
+
+xtrn <- table(actual=revDTM_sentiNrc_trn$hiLo, preds=revSentiNrc_predTrn70[,2]>0.5)
+xtrn
+```
+
+
+The table shows confusion matrix of test dataset:
+
+```{r message =FALSE, cache=TRUE}
+#Obtain predictions, and calculate performance
+revSentiNrc_predTst70<- predict(rfModelnrc70, revDTM_sentiNrc_tst %>% select(-review_id))$predictions
+
+revSentiNrc_predTst120<- predict(rfModelnrc120, revDTM_sentiNrc_tst %>% select(-review_id))$predictions
+
+revSentiNrc_predTst180<- predict(rfModelnrc180, revDTM_sentiNrc_tst %>% select(-review_id))$predictions
+
+x70 <- table(actual=revDTM_sentiNrc_tst$hiLo, preds=revSentiNrc_predTst70[,2]>0.5)
+x70
+
+x120 <- table(actual=revDTM_sentiNrc_tst$hiLo, preds=revSentiNrc_predTst120[,2]>0.5)
+x120
+
+x180 <- table(actual=revDTM_sentiNrc_tst$hiLo, preds=revSentiNrc_predTst180[,2]>0.5)
+x180
+```
+
+The table points out peformance metrics of the random forest model on test dataset:
+
+```{r message =FALSE, cache=TRUE}
+Metric <- c("Accuracy","Precision","Recall")
+Result_rf70 <- c(round((x70[1, 1] + x70[2, 2]) / sum(x70),3), round(x70[2,2]/(x70[2,1]+x70[2,2]),3), round(x70[2,2]/(x70[1,2]+x70[2,2]),3))
+p <- as.data.frame(cbind(Metric, Result_rf70 ))
+colnames(p) <- c('Metric','Value')
+p
+
+Metric <- c("Accuracy","Precision","Recall")
+Result_rf120 <- c(round((x120[1, 1] + x120[2, 2]) / sum(x120),3), round(x120[2,2]/(x120[2,1]+x120[2,2]),3), round(x120[2,2]/(x120[1,2]+x120[2,2]),3))
+p <- as.data.frame(cbind(Metric, Result_rf120 ))
+colnames(p) <- c('Metric','Value')
+p
+
+Metric <- c("Accuracy","Precision","Recall")
+Result_rf180 <- c(round((x180[1, 1] + x180[2, 2]) / sum(x180),3), round(x180[2,2]/(x180[2,1]+x180[2,2]),3), round(x180[2,2]/(x180[1,2]+x180[2,2]),3))
+p <- as.data.frame(cbind(Metric, Result_rf180 ))
+colnames(p) <- c('Metric','Value')
+p
+
+```
+
+This plot indicates ROC curve of the random forest model on train and test dataset.Wen blue line represents the model performance on training data, red line corresponds to test data.
+
+```{r message =FALSE, cache=TRUE}
+library(pROC)
+rocTrn <- roc(revDTM_sentiNrc_trn$hiLo, revSentiNrc_predTrn70[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiNrc_tst$hiLo, revSentiNrc_predTst70[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+```
+
+Then, we determined best threshold by using ROC curve and so created the confusion matrix on test data. It can be clearly seen that random forest model with the optimal thresholds separates reviews which have different class much better.
+
+```{r message =FALSE, cache=TRUE}
+#Best threshold from ROC analyses
+bThr<-coords(rocTrn, "best", ret="threshold", transpose = FALSE)
+thresh <- rep(bThr,nrow(revSentiNrc_predTst70))
+thresh[1]
+upd<- table(actual=revDTM_sentiNrc_tst$hiLo, preds=revSentiNrc_predTst70[,2]>thresh)
+upd
+```
+
+```{r message =FALSE, cache=TRUE}
+Metric <- c("Accuracy","Recall","Precision")
+Result_rf_upd <- c(round((upd[1, 1] + upd[2, 2]) / sum(upd),3), round(upd[2,2]/(upd[2,1]+upd[2,2]),3), round(upd[2,2]/(upd[1,2]+upd[2,2]),3))
+q <- as.data.frame(cbind(Metric, Result_rf_upd))
+colnames(q) <- c('Metric','Value')
+q
+```
