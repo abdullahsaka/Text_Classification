@@ -1,2 +1,3 @@
-# Text_Classification
-Master's project - Text Mining and Classification Models on 'Yelp' Reviews data
+
+This is the project that I did in 'Data Mining' course as part of my Master's Program.
+
